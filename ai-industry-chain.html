@@ -912,18 +912,31 @@ function getKline(json,code){
   }
   return null;
 }
+function yahooToKline(json){
+  const r=json&&json.chart&&json.chart.result&&json.chart.result[0];
+  if(!r||!r.timestamp||!r.indicators||!r.indicators.quote||!r.indicators.quote[0])return null;
+  const q=r.indicators.quote[0];const ts=r.timestamp;const out=[];
+  for(let i=0;i<ts.length;i++){
+    const o=q.open[i],c=q.close[i],h=q.high[i],l=q.low[i],v=q.volume[i];
+    if(o==null||c==null||h==null||l==null)continue;
+    const dt=new Date(ts[i]*1000);const ds=dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0')+'-'+String(dt.getDate()).padStart(2,'0');
+    out.push([ds,+o,+c,+h,+l,+(v||0)]);
+  }
+  return out.length>=2?out:null;
+}
 function periodPct(closes,n){
   const i=closes.length-1-n;if(i<0)return null;const base=closes[i];if(!base)return null;
   return (closes[closes.length-1]-base)/base*100;
 }
+const US_KLINE_FALLBACK={usLNVGY:'hk0992',usNIO:'hk09866'};
 async function fetchKlineOne(code){
   // 美股 K 线：主源走腾讯代理域 proxy.finance.qq.com（CORS 开放、全美股通用），分支内注释见下。
   // 注意：① proxy.finance.qq.com 对美股 kline 返回完整历史；② 东方财富 105.<TICKER> 只对纳斯达克有效（纽交所 JNPR/GLW/BA­BA 等取不到 data），现统一改走腾讯代理域 proxy.finance.qq.com（CORS 开放、全美股通用）。
   if(code.startsWith('us')){
+    const tk=code.slice(2).toUpperCase();
     // 主源：腾讯代理域 proxy.finance.qq.com（与 A/港股同源，CORS 开放，浏览器可直连），
-    // 对纳斯达克+纽交所全美股返回完整历史日K（实测 usNVDA/usJNPR 均含 2026-07-10 最新交易日）。
-    // 注：腾讯源站 web.ifzq.gtimg.cn 虽也返回完整历史，但无 CORS 头、不支持 JSONP，浏览器 fetch 被跨域拦截，故不可用；
-    //     东方财富 push2his 的 105.<TICKER> 只对纳斯达克有效（纽交所 JNPR/GLW/BABA 等取不到 data），仅作极端兜底。
+    // 对纳斯达克+纽交所全美股返回完整历史日K。少数美股（如 LNVGY 场外粉单、NIO/Dell 等）
+    // 腾讯日K数据缺失或仅 1 个陈旧点，依次走下方兜底。
     const url='https://proxy.finance.qq.com/ifzqgtimg/appstock/app/usfqkline/get?param='+code+',day,2023-01-01,2099-01-01,800,qfq';
     for(let attempt=0;attempt<2;attempt++){
       try{
@@ -934,14 +947,28 @@ async function fetchKlineOne(code){
       }catch(e){}
       if(attempt<1)await new Promise(r=>setTimeout(r,300));
     }
-    // 兜底：东方财富 push2his JSONP（纳斯达克 ticker 可用）
-    const tk=code.slice(2).toUpperCase();
+    // 兜底①：改用其港股上市代码抓 K 线（港股腾讯 CORS 开放、数据完整）。币种为港元，详情页注明。
+    const fb=US_KLINE_FALLBACK[code];
+    if(fb){
+      try{
+        const r2=await fetch('https://proxy.finance.qq.com/ifzqgtimg/appstock/app/fqkline/get?param='+fb+',day,2023-01-01,2099-01-01,800,qfq',{cache:'no-store'});
+        if(r2.ok){const j2=await r2.json();const arr2=getKline(j2,fb);if(arr2&&arr2.length>=2){applyKlineTo(code,arr2,null);const dd=data[code];if(dd)dd.klineSrc='hk';return;}}
+      }catch(e){}
+    }
+    // 兜底②：东方财富 push2his JSONP（纳斯达克 ticker 可用；纽交所取不到 data）
     try{
       const cb='_emKl'+Math.random().toString(36).slice(2);
       const emUrl='https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=105.'+tk+'&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56&klt=101&fqt=0&beg=20230101&end=20990101&cb='+cb;
       const json=await jsonpKline(emUrl,cb);
       const arr=getKline(json,code);
       if(arr&&arr.length>=2){applyKlineTo(code,arr,null);return;}
+    }catch(e){}
+    // 兜底③：Yahoo Finance（覆盖全部美股含纽交所/OTC；best-effort，CORS 受限时失败）
+    try{
+      const ac=new AbortController();const to=setTimeout(()=>ac.abort(),7000);
+      const yr=await fetch('https://query1.finance.yahoo.com/v8/finance/chart/'+tk+'?range=2y&interval=1d',{signal:ac.signal,cache:'no-store'});
+      clearTimeout(to);
+      if(yr.ok){const yj=await yr.json();const arr=yahooToKline(yj);if(arr&&arr.length>=2){applyKlineTo(code,arr,null);const dd=data[code];if(dd)dd.klineSrc='yahoo';return;}}
     }catch(e){}
     return;
   }
@@ -1133,27 +1160,46 @@ function updateIndexChips(){
     el.className='idx-chip '+(ch>=0?'up':'down');
   });
 }
-/* 等权合成指数 K 线（前复权，成分股归一化加权） */
+/* 等权合成指数 K 线（基于成分股日收益率等权链乘，前复权）
+   修正说明：旧算法把指数当作「成分股归一化收盘价的平均值」，并用横截面最大/最小
+   归一化价作为指数最高/最低，导致个别大涨成分股把指数振幅放大到失真（单日振动远超
+   成分股整体）。现改为与成熟指数一致的「加权收益率链乘」：指数日收益率 = 等权平均
+   (各成分股当日收益率)，指数点位 = 前收 ×(1+日收益率)，最高/最低 = 前收 ×(1+当日最大/
+   最小成分股收益率)。这样指数单日振幅 = 成分股当日收益率的离散区间，真实反映权重成分股
+   整体涨跌趋势，与市面成熟指数（如标普500等权）口径一致。 */
 function buildIndexKline(codes){
   const series=codes.map(c=>{const d=data[c];if(!d||!d.kline||d.kline.length<2)return null;
     const arr=d.kline.slice(-260);const m={};arr.forEach(e=>{m[e[0]]={o:parseFloat(e[1]),c:parseFloat(e[2]),h:parseFloat(e[3]),l:parseFloat(e[4]),v:parseFloat(e[5]||0)};});
-    const dates=Object.keys(m).sort();return {dates,m,base:m[dates[0]].c};
+    const dates=Object.keys(m).sort();return {dates,m};
   }).filter(Boolean);
   if(!series.length)return null;
   const allDates=[...new Set(series.flatMap(s=>s.dates))].sort();
-  const dates=[],opens=[],closes=[],highs=[],lows=[],vols=[];let prev=null;
+  const dates=[],opens=[],closes=[],highs=[],lows=[],vols=[];
+  let level=1000;                        // 指数基准点位
   const ptr=series.map(()=>0);
+  const prevBar=series.map(()=>null);    // 各序列上一可用交易日的 bar
   for(const dt of allDates){
-    let sC=0,nC=0,sO=0,nO=0,mH=-1e18,mL=1e18,sV=0,has=false;
+    let sumR=0,sumV=0,n=0,has=false,hiRatio=1,loRatio=1,hasRatio=false;
     series.forEach((s,si)=>{
       while(ptr[si]<s.dates.length&&s.dates[ptr[si]]<=dt)ptr[si]++;
       const idx=ptr[si]-1;if(idx<0)return;
-      const rec=s.m[s.dates[idx]];const f=rec.c/s.base;
-      sC+=f;nC++;sO+=rec.o/s.base;nO++;mH=Math.max(mH,rec.h/s.base);mL=Math.min(mL,rec.l/s.base);sV+=rec.v;has=true;
+      const rec=s.m[s.dates[idx]];
+      if(prevBar[si]){
+        const r=rec.c/prevBar[si].c-1;    // 当日收益率（前收→今收）
+        sumR+=r;
+        const hr=rec.h/prevBar[si].c,lr=rec.l/prevBar[si].c;
+        if(!hasRatio){hiRatio=hr;loRatio=lr;hasRatio=true;}else{hiRatio=Math.max(hiRatio,hr);loRatio=Math.min(loRatio,lr);}
+      }
+      sumV+=rec.v;n++;has=true;
     });
-    if(!has||!nC)continue;
-    const ic=sC/nC,iop=prev!=null?prev:sO/nO;
-    dates.push(dt);opens.push(+iop.toFixed(3));closes.push(+ic.toFixed(3));highs.push(+mH.toFixed(3));lows.push(+mL.toFixed(3));vols.push(sV);prev=ic;
+    if(!has)continue;
+    const R=n?sumR/n:0;                    // 等权平均日收益率
+    const openLv=level,closeLv=level*(1+R);
+    const highLv=level*hiRatio,lowLv=level*loRatio;
+    dates.push(dt);opens.push(+openLv.toFixed(3));closes.push(+closeLv.toFixed(3));
+    highs.push(+highLv.toFixed(3));lows.push(+lowLv.toFixed(3));vols.push(sumV);
+    level=closeLv;
+    series.forEach((s,si)=>{const idx=ptr[si]-1;if(idx>=0)prevBar[si]=s.m[s.dates[idx]];});
   }
   if(closes.length<2)return null;
   return {dates,opens,closes,highs,lows,vols};
@@ -1167,7 +1213,7 @@ function refreshIndexHeader(chg){
 }
 function buildIndexIntroHTML(name,consts,eqw){
   let h='<div class="intro-enrich">';
-  h+=`<div class="intro-ol">本指数为「${escHtml(name)}」成分股的<b>等权合成指数</b>（前复权），反映该环节/板块整体涨跌。成分权重为等权（每只约 ${eqw!=null?eqw.toFixed(1)+'%':'—'}）。下列成分按当日涨跌幅排序，点击任意个股可查看其详情。</div>`;
+  h+=`<div class="intro-ol">本指数为「${escHtml(name)}」成分股的<b>等权合成指数</b>（基于成分股日收益率等权链乘，前复权），反映该环节/板块整体涨跌。成分权重为等权（每只约 ${eqw!=null?eqw.toFixed(1)+'%':'—'}）。下列成分按当日涨跌幅排序，点击任意个股可查看其详情。</div>`;
   const rows=[...consts].map(({c,n})=>({c,n,d:data[c]})).sort((a,b)=>(b.d&&b.d.day!=null?b.d.day:-1e9)-(a.d&&a.d.day!=null?a.d.day:-1e9));
   h+='<div class="idx-constituents"><div class="idx-ch">指数成分涨跌排序（点击查看个股详情）</div>';
   h+='<div class="idx-row idx-hrow"><span class="idx-nm">名称</span><span class="w-col">权重</span><span class="m price">现价</span><span class="m">日</span><span class="m">5日</span><span class="m">20日</span><span class="m">60日</span></div>';
@@ -1193,6 +1239,7 @@ async function openIndex(key){
   const modal=document.getElementById('detail');if(!modal)return;
   modal.classList.remove('hidden');
   modal.classList.remove('etf-mode');
+  {const bn=document.getElementById('bandNote');if(bn){const kf=bn.querySelector('#klineFromNote');if(kf)kf.remove();}}
   setIntroTitle('指数成分与涨跌');
   const head=document.getElementById('dHead');
   head.querySelector('.nm').textContent=title;
@@ -1230,6 +1277,7 @@ async function openEtf(code){
   if(peChart){peChart.dispose();peChart=null;}
   modal.classList.remove('hidden');
   modal.classList.remove('etf-mode');
+  {const bn=document.getElementById('bandNote');if(bn){const kf=bn.querySelector('#klineFromNote');if(kf)kf.remove();}}
   detailMode='etf';detailIdxKey=null;detailCode=code;
   const head=document.getElementById('dHead');
   head.querySelector('.nm').textContent=(meta.name||code)+' · 成分股';
@@ -1534,6 +1582,7 @@ async function openDetail(code){
   modal.classList.remove('hidden');
   modal.classList.remove('etf-mode');
   setIntroTitle('成分权重 · 公司画像');
+  {const bn=document.getElementById('bandNote');if(bn){const kf=bn.querySelector('#klineFromNote');if(kf)kf.remove();}}
   const head=document.getElementById('dHead');
   head.querySelector('.nm').textContent=meta.name||code;
   head.querySelector('.meta').textContent=[meta.board,code,meta.sector].filter(Boolean).join(' · ');
@@ -1556,6 +1605,12 @@ async function openDetail(code){
   document.getElementById('dTech').innerHTML=buildTechHTML(m);
   if(window.echarts){
     renderKlineChart(m);
+  }
+  const dnow=data[code]||{};
+  if(dnow.klineSrc){
+    const bn=document.getElementById('bandNote');
+    if(bn){const msg=dnow.klineSrc==='hk'?'K线取自港股（港元），与上方美元报价币种不同':'K线取自 Yahoo Finance（美元）';
+      bn.insertAdjacentHTML('beforeend',' · <b id="klineFromNote">'+msg+'</b>');}
   }
 }
 function closeDetail(){
@@ -1691,26 +1746,46 @@ async function loadPerfBlock(code){
 /* ============== ETF 全部成分股（实时） ============== */
 function toDash(sec){if(/^6/.test(sec))return 'sh'+sec;if(/^[03]/.test(sec))return 'sz'+sec;if(/^[48]/.test(sec))return 'bj'+sec;return sec;}
 function etfConsRows(cons){
-  const list=[...(cons||[])].sort((a,b)=>((b.w||0)-(a.w||0)));
-  let h='<div class="etf-row etf-hrow"><span class="etf-nm">成分股</span><span class="etf-code">代码</span><span class="etf-day">日涨跌</span></div>';
+  const list=[...(cons||[])];
+  // 按当日涨跌幅降序（无行情数据排最后），与上方说明「按当日涨跌幅排序」一致
+  list.sort((a,b)=>((data[b.c]&&data[b.c].day!=null?data[b.c].day:-1e9)-(data[a.c]&&data[a.c].day!=null?data[a.c].day:-1e9)));
+  let h='<div class="etf-row etf-hrow"><span class="etf-nm">成分股</span><span class="etf-code">代码</span><span class="etf-w">权重</span><span class="etf-day">日涨跌</span></div>';
   if(!list.length){h+='<div class="etf-row"><span class="etf-nm" style="color:var(--sub)">暂无成分股数据</span></div>';return h;}
   list.forEach(r=>{const dd=data[r.c]||{};const dayc=dd.day!=null?cls(dd.day):'flat';const dayTxt=dd.day!=null?sign(dd.day)+dd.day.toFixed(2)+'%':'—';
-    h+=`<div class="etf-row" data-detail="${r.c}"><span class="etf-nm">${escHtml(r.n)}</span><span class="etf-code">${r.c}</span><span class="etf-day ${dayc}">${dayTxt}</span></div>`;});
+    const wTxt=r.w!=null?r.w.toFixed(2)+'%':'—';
+    h+=`<div class="etf-row" data-detail="${r.c}"><span class="etf-nm">${escHtml(r.n)}</span><span class="etf-code">${r.c}</span><span class="etf-w">${wTxt}</span><span class="etf-day ${dayc}">${dayTxt}</span></div>`;});
   return h;
 }
 async function loadEtfCons(code,idx){
   const el=document.getElementById('etfCons');if(!el||!idx)return;
   el.innerHTML='<div class="etf-row"><span class="etf-nm" style="color:var(--sub)">正在抓取全部成分股（实时）…</span></div>';
+  // 静态权重表（基金披露前十大权重，最准确），按代码建立映射
+  const wmap={};(ETF_INFO[code]&&ETF_INFO[code].cons||[]).forEach(r=>{if(r.c)wmap[r.c]=r.w;});
   const cb='_emIdx'+Math.random().toString(36).slice(2);
   const cols='SECURITY_CODE,SECURITY_NAME_ABBR';
   const url='https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_INDEX_CONSTITUENT&columns='+cols+'&filter=(INDEX_CODE%3D%22'+idx+'%22)&pageSize=300&source=WEB&client=WEB&callback='+cb;
   try{
     const json=await jsonpEMReport(url,cb);
-    const data=json&&json.result&&json.result.data;
-    if(!data||!data.length){el.innerHTML=etfConsRows((ETF_INFO[code]||{}).cons);return;}
-    const list=data.map(r=>({c:toDash(r.SECURITY_CODE),n:r.SECURITY_NAME_ABBR}));
-    // 把实时成分股写进 codeMeta，避免从 ETF 详情点进去时名字退化成股票代码
+    const ed=json&&json.result&&json.result.data;
+    let list;
+    if(ed&&ed.length){
+      list=ed.map(r=>{const c=toDash(r.SECURITY_CODE);return {c,n:r.SECURITY_NAME_ABBR,w:(wmap[c]!=null?wmap[c]:(wmap[r.SECURITY_CODE]!=null?wmap[r.SECURITY_CODE]:null))};});
+      // 补回实时列表里缺失的静态成分（极少数情况）
+      (ETF_INFO[code]&&ETF_INFO[code].cons||[]).forEach(r=>{if(!list.find(x=>x.c===r.c))list.push({c:r.c,n:r.n,w:r.w});});
+    }else{
+      list=(ETF_INFO[code]||{}).cons||[];
+    }
+    // 写 codeMeta，避免点进去名字退化成代码
     list.forEach(r=>{if(!codeMeta[r.c])codeMeta[r.c]={name:r.n,board:boardTag(r.c),industry:'ai',layer:'etf',sector:'ETF成分'};});
+    // 拉取这些成分股的实时行情（日涨跌/现价），否则日涨跌一栏显示 —
+    const codes=list.map(r=>r.c);
+    if(codes.length){
+      const chunks=[];for(let i=0;i<codes.length;i+=90)chunks.push(codes.slice(i,i+90));
+      try{
+        const res=(await Promise.all(chunks.map(jsonpFetch))).flat();
+        res.forEach(r=>{const m=codeMeta[r.code]||{};data[r.code]={...m,...r,okRt:true};});
+      }catch(e){}
+    }
     el.innerHTML=etfConsRows(list);
   }catch(e){el.innerHTML=etfConsRows((ETF_INFO[code]||{}).cons);}
 }
