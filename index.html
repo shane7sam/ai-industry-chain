@@ -1974,7 +1974,7 @@ function introRow(k,v,risk){
   return '<div class="ir'+(risk?' risk':'')+'"><span class="irk">'+escHtml(k)+'</span><p>'+escHtml(v)+'</p></div>';
 }
 const ANN_PROXY='';  // 公告/要闻默认走东方财富 search-api-web JSONP 直连（按股票名称检索、按时间排序，自带摘要与原文链接）。如需自建代理兜底，可填 Cloudflare Worker 地址，但其路由需返回 {ann:[],news:[]} 结构，本版未再调用该代理。
-const KLINE_PROXY=''; // 美股 K 线代理(Cloudflare Worker，方案 A)。部署 worker.js 后填入其地址(如 https://xxx.workers.dev)，即启用最实时的美股 K 线(覆盖纳斯达克+纽交所)。未部署时，云端自动回退到内嵌静态快照 us_kline_cache.js(方案 B)，保证必显示、零运行时依赖。本地(server.py)不受影响，仍走新浪直连。worker.js 路由见 /api/kline 与 /api/sina-kline。
+const KLINE_PROXY='https://ai-industry-proxy.senhaohu.workers.dev'; // 美股 K 线代理(Cloudflare Worker，方案 A)。已部署——启用最实时的美股 K 线(覆盖纳斯达克+纽交所)。云端自动回退到内嵌静态快照 us_kline_cache.js(方案 B)兜底。本地(server.py)不受影响，仍走新浪直连。worker.js 路由见 /api/kline 与 /api/sina-kline。
 // 公告类型标签（按标题关键词识别，突出“重大”事项）
 function annTag(t){
   if(/业绩|财报|一季|半年|年报|季报|预告|快报/.test(t))return{tx:'业绩',cls:'t-blue'};
