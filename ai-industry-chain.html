@@ -341,6 +341,7 @@
   .w-w{text-align:right;color:var(--midstream);font-weight:700;font-variant-numeric:tabular-nums}
   /* ETF 详情现展示完整 K 线/技术面，不再隐藏其它 section */
   .perf-na{color:var(--sub);font-style:italic}
+  .perf-fc{color:#f59e0b;font-weight:600}
   .perf-fc a{color:#22d3ee;font-weight:600;text-decoration:none}
   .perf-fc a:hover{text-decoration:underline}
   .etf-full{color:var(--midstream);font-size:11px;margin-left:4px}
@@ -1716,6 +1717,17 @@ function parseForecastPeriod(title){
   else if(/年度|年报|Annual/i.test(title))mm='12-31';
   return yr+'-'+mm;
 }
+function extractPerfKey(text){
+  // 从业绩预告公告摘要中提取关键业绩信息（净利润/营收/同比等），去掉冗余的公告套话
+  text=(text||'').replace(/<[^>]+>/g,'').replace(/\s+/g,' ').trim();
+  if(!text)return '';
+  // 去掉开头的"XXX(代码)X月X日晚间发布业绩预告，"之类的引导语
+  text=text.replace(/^.*?(发布|披露|公布)(业绩预告|业绩快报|半年度业绩预告|季度业绩预告)[，,、:：]?/,'');
+  const sents=text.split(/[。；;]/).map(s=>s.trim()).filter(Boolean);
+  const key=sents.filter(s=>/净利润|营业收入|营收|同比|扭亏|亏损|盈利|增长|下降|预计|预盈|预亏/.test(s));
+  let out=key.length?key.slice(0,3).join('；'):(sents[0]||text);
+  return out.length>150?out.slice(0,150)+'…':out;
+}
 function fetchForecastNotice(code,name){
   // 最新一期业绩预告：从公司真实披露公告(notice)中按证券短名+标题筛选，取最新一条
   return new Promise(resolve=>{
@@ -1724,16 +1736,13 @@ function fetchForecastNotice(code,name){
     if(!name){clearTimeout(t);resolve(null);return;}
     jsonpSearchType(name,'notice',4, items=>{
       if(done)return;done=true;clearTimeout(t);
-      const list=(items||[]).filter(it=>sameStock(it.sec,name)&&isForecastTitle(it.title));
+      const list=(items||[]).filter(it=>(sameStock(it.sec,name)||relName(it.title,name))&&isForecastTitle(it.title));
       if(!list.length){resolve(null);return;}
       list.sort((a,b)=>(b.date||'').localeCompare(a.date||''));
       const it=list[0];
       const periodKey=parseForecastPeriod(it.title);
-      const summary=((it.summary||it.title||'').replace(/<[^>]+>/g,'')).replace(/\s+/g,' ').trim();
-      const map={sh:'SH',sz:'SZ',bj:'BJ'};const pfx=map[code.slice(0,2)]||'';
-      const list2=pfx+code.slice(2).toUpperCase();
-      const link=it.url||('https://so.eastmoney.com/ann/s/'+list2+'.html');
-      resolve({periodKey,title:it.title,summary:summary.slice(0,150),link});
+      const summary=extractPerfKey(it.summary||it.title);
+      resolve({periodKey,title:it.title,summary,date:it.date||''});
     });
   });
 }
@@ -1755,11 +1764,8 @@ function renderPerfLive(reported,fc,code){
   for(const k of periods){
     if(reported&&reported[k]){rows.push([perfLabel(k,false),reported[k]]);continue;}
     if(fc&&fc.periodKey===k){
-      const map={sh:'SH',sz:'SZ',bj:'BJ'};const pfx=map[code.slice(0,2)]||'';
-      const list=pfx+code.slice(2).toUpperCase();
-      const link=fc.url||('https://so.eastmoney.com/ann/s/'+list+'.html');
       const txt=fc.summary||fc.title;
-      rows.push([perfLabel(k,true),'<a class="perf-fc" href="'+escHtml(link)+'" target="_blank" rel="noopener" title="'+escHtml(fc.title)+'">'+escHtml(txt)+'</a>']);
+      rows.push([perfLabel(k,true),'<span class="perf-fc" title="'+escHtml(fc.title)+'">'+escHtml(txt)+'</span>']);
       continue;
     }
     break;
@@ -1892,7 +1898,7 @@ function annTag(t){
 }
 function renderAnnBlock(arr,link){
   const ul=document.getElementById('dAnnList');if(!ul)return false;
-  if(!arr||!arr.length){ul.innerHTML='<li class="news-empty">近期暂无该公司重大公告，可前往 <a href="'+link+'" target="_blank" rel="noopener">东方财富公告页</a></li>';return true;}
+  if(!arr||!arr.length){ul.innerHTML='<li class="news-empty">近20日内暂无该公司公告，可前往 <a href="'+link+'" target="_blank" rel="noopener">东方财富公告页</a></li>';return true;}
   let h='';
   arr.slice(0,6).forEach(it=>{
     const title=it.title||'(无标题)';
@@ -1913,7 +1919,7 @@ function renderAnnBlock(arr,link){
 }
 function renderNewsBlock(arr,link){
   const ul=document.getElementById('dNewsList');if(!ul)return false;
-  if(!arr||!arr.length){ul.innerHTML='<li class="news-empty">近期暂无该公司相关要闻，可前往 <a href="'+link+'" target="_blank" rel="noopener">东方财富资讯页</a></li>';return true;}
+  if(!arr||!arr.length){ul.innerHTML='<li class="news-empty">近20日内暂无该公司相关要闻，可前往 <a href="'+link+'" target="_blank" rel="noopener">东方财富资讯页</a></li>';return true;}
   let h='';
   arr.slice(0,6).forEach(it=>{
     const title=it.title||'(无标题)';
@@ -1988,14 +1994,24 @@ function sameStock(sec,name){
   const short=shortNameOf(name);
   return sec.indexOf(name)>=0||name.indexOf(sec)>=0||(short&&sec.indexOf(short)>=0);
 }
+// Promise 化的资讯检索（便于多源合并/回退）
+function searchType(keyword,type,pages){return new Promise(res=>jsonpSearchType(keyword,type,pages,items=>res(items||[])));}
+// 是否在最近 N 天内（含 1 天容差，跨时区安全）
+function withinDays(dateStr,days){
+  if(!dateStr)return false;
+  const t=Date.parse(String(dateStr).slice(0,10));
+  if(isNaN(t))return false;
+  return (Date.now()-t)<=days*86400000+86400000;
+}
 async function fetchAnnouncements(code){
   const el=document.getElementById('dNews');if(!el)return;
   const meta=codeMeta[code]||{};
   const name=meta.name||'';
   const isUS=code.startsWith('us');
+  const isHK=code.startsWith('hk');
   if(!name){el.innerHTML='<div class="d-note">该标的暂无匹配的公告与要闻来源，请前往对应交易所或行情终端查看。</div>';return;}
   let annLink,newsLink;
-  if(isUS){
+  if(isUS||isHK){
     annLink='https://so.eastmoney.com/ann/s/'+code.toUpperCase()+'.html';
     newsLink='https://so.eastmoney.com/news/s/'+code.toUpperCase()+'.html';
   }else{
@@ -2005,29 +2021,29 @@ async function fetchAnnouncements(code){
     annLink='https://so.eastmoney.com/ann/s/'+list+'.html';
     newsLink='https://so.eastmoney.com/news/s/'+list+'.html';
   }
-  el.innerHTML='<div class="news-block"><div class="news-h">重大公告 <span class="news-src">'+(isUS?'东方财富 · 美股公告/资讯':'东方财富 · 公司公告')+'</span></div><ul class="news-list" id="dAnnList"><li class="news-loading">正在获取…</li></ul></div>'
+  el.innerHTML='<div class="news-block"><div class="news-h">重大公告 <span class="news-src">东方财富 · 公司公告</span></div><ul class="news-list" id="dAnnList"><li class="news-loading">正在获取…</li></ul></div>'
              +'<div class="news-block"><div class="news-h">近期要闻 <span class="news-src">东方财富资讯</span></div><ul class="news-list" id="dNewsList"><li class="news-loading">正在获取…</li></ul></div>';
-  if(isUS){
-    // 美股：以公司中文名检索资讯，按公告类关键词筛选“重大公告”
-    jsonpSearchType(name,'cmsArticleWebOld',2, items=>{
-      const ann=items.filter(it=>relName(it.title,name)&&isAnnItem(it.title,name,shortNameOf(name)));
-      renderAnnBlock(ann.length?ann:items.filter(it=>relName(it.title,name)).slice(0,6), annLink);
-    });
-    jsonpSearchType(name,'cmsArticleWebOld',2, items=>{
-      const news=items.filter(it=>relName(it.title,name)&&!isAnnItem(it.title,name,shortNameOf(name)));
-      renderNewsBlock(news, newsLink);
-    });
-  }else{
-    // A股：重大公告用 notice 类型（真实公司披露公告），按证券短名过滤；要闻用新闻类型按公司名过滤
-    jsonpSearchType(name,'notice',4, items=>{
-      const ann=items.filter(it=>sameStock(it.sec,name));
-      renderAnnBlock(ann, annLink);
-    });
-    jsonpSearchType(name,'cmsArticleWebOld',2, items=>{
-      const news=items.filter(it=>relName(it.title,name));
-      renderNewsBlock(news, newsLink);
-    });
-  }
+  const byDate=(a,b)=>(b.date||'').localeCompare(a.date||'');   // 时间从近到远
+  const recent=it=>withinDays(it.date,20);                       // 仅保留 20 天内
+  const short=shortNameOf(name);
+  // ===== 公司公告（A股/港股/美股统一逻辑）=====
+  // 1) 优先用 notice（真实披露公告），按名称匹配（证券短名或标题含公司名）
+  try{
+    let ann=(await searchType(name,'notice',4)).filter(it=>sameStock(it.sec,name)||relName(it.title,name));
+    // 2) notice 无结果（港股/美股常见）时，回退到资讯源里的“公告类”条目
+    if(!ann.length){
+      const arts=await searchType(name,'cmsArticleWebOld',3);
+      ann=arts.filter(it=>relName(it.title,name)&&isAnnItem(it.title,name,short));
+    }
+    ann=ann.filter(recent).sort(byDate);
+    renderAnnBlock(ann, annLink);
+  }catch(e){renderAnnBlock([], annLink);}
+  // ===== 近期要闻（同样按时间从近到远、只留 20 天内）=====
+  try{
+    const news=(await searchType(name,'cmsArticleWebOld',3))
+      .filter(it=>relName(it.title,name)).filter(recent).sort(byDate);
+    renderNewsBlock(news, newsLink);
+  }catch(e){renderNewsBlock([], newsLink);}
 }
 
 /* ============== 控制 ============== */
