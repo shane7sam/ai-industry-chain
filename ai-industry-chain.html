@@ -259,11 +259,13 @@
   @media(max-width:620px){
     .modal-panel{width:100%;height:100%;max-height:100vh}
     .chart-box{height:300px}
-    .d-head{display:grid;grid-template-columns:auto 1fr auto;grid-template-areas:"back title close" "px px px";gap:8px 10px;align-items:center;padding:12px 14px}
+    .d-head{display:grid;grid-template-columns:auto minmax(0,1fr) auto;grid-template-areas:"back title close" "px px px";gap:8px 10px;align-items:center;padding:12px 14px}
     .d-back{grid-area:back}
-    .d-head>div:first-of-type{grid-area:title}
+    .d-head>div:first-of-type{grid-area:title;min-width:0}
     .d-head .px{grid-area:px;margin-left:0;width:100%;text-align:left}
     .d-close{grid-area:close}
+    /* 长名字（如 II-VI(Coherent)、超微(Supermicro)）在手机端不撑破网格：列可收缩 + 任意处断行 */
+    .d-head .nm,.d-head .meta{min-width:0;overflow-wrap:anywhere;word-break:break-word}
     .d-body{padding:12px 14px 36px;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}
     .ov-movers{grid-template-columns:1fr}
   }
@@ -1655,6 +1657,8 @@ async function loadEtfCons(code,idx){
     const data=json&&json.result&&json.result.data;
     if(!data||!data.length){el.innerHTML=etfConsRows((ETF_INFO[code]||{}).cons);return;}
     const list=data.map(r=>({c:toDash(r.SECURITY_CODE),n:r.SECURITY_NAME_ABBR}));
+    // 把实时成分股写进 codeMeta，避免从 ETF 详情点进去时名字退化成股票代码
+    list.forEach(r=>{if(!codeMeta[r.c])codeMeta[r.c]={name:r.n,board:boardTag(r.c),industry:'ai',layer:'etf',sector:'ETF成分'};});
     el.innerHTML=etfConsRows(list);
   }catch(e){el.innerHTML=etfConsRows((ETF_INFO[code]||{}).cons);}
 }
