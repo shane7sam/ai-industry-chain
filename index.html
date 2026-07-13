@@ -41,7 +41,6 @@
   .nav-group{display:flex;align-items:center;gap:6px;flex-wrap:wrap;background:var(--panel-2);border:1px solid var(--line);border-radius:10px;padding:5px 6px}
   .nav-label{font-size:13px;font-weight:700;color:var(--text);padding:7px 10px;white-space:nowrap;cursor:default}
   .main-nav>button{font-size:13px;font-weight:600;padding:8px 16px}
-  .main-nav>button.active[data-menu="prophet"]{background:var(--midstream);border-color:var(--midstream);color:#fff}
   .sub-filter{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
   .sub-filter button{font-size:12px;font-weight:600;padding:7px 14px;color:var(--sub);background:var(--panel);border-color:var(--line);border-radius:8px;transition:.12s}
   .sub-filter button:hover{border-color:var(--midstream);color:var(--text)}
@@ -513,7 +512,10 @@
             <button data-ind="bio">创新药</button>
           </div>
         </div>
-        <button data-menu="prophet">预言家</button>
+      <div class="nav-group">
+        <span class="nav-label">预言家</span>
+        <button id="prophetTab" data-view="prophet">事件日历 · 新闻库</button>
+      </div>
       </div>
       <div class="stock-search">
         <input id="stockSearch" type="search" placeholder="搜索代码/简称，如 600498、北方华创" autocomplete="off" aria-label="股票搜索" spellcheck="false">
@@ -531,6 +533,7 @@
   </div>
 </header>
 <main id="app"></main>
+<section id="prophetView" class="hidden"></section>
 <nav id="floatNav" class="float-nav"></nav>
 <footer>
   实时行情：腾讯证券（<code>qt.gtimg.cn</code>，JSONP 浏览器直连）；A 股 / 港股 / 美股前复权日 K 线：腾讯（<code>proxy.finance.qq.com</code>，浏览器直连）。区间涨跌为前复权收盘价口径。<br>
@@ -568,6 +571,7 @@
   </div>
 </div>
 <script src="us_kline_cache.js?v=20260712b"></script>
+<script src="prophet.js"></script>
 <script>
 
 const LAYERS=[
@@ -3964,9 +3968,6 @@ function setIndustry(ind){
     x.style.borderColor=on?col:'';
     x.style.color=on?'#fff':'';
   });
-  /* 取消预言家高亮（当前属于产业链） */
-  const prophetBtn=document.querySelector('#layerFilter button[data-menu="prophet"]');
-  if(prophetBtn)prophetBtn.classList.remove('active');
   /* 同步手机底部产业链栏 */
   document.querySelectorAll('#mobIndBar button').forEach(x=>{
     const on=x.dataset.ind===ind;
@@ -5866,6 +5867,7 @@ function introRow(k,v,risk){
 }
 const ANN_PROXY='';  // 公告/要闻默认走东方财富 search-api-web JSONP 直连（按股票名称检索、按时间排序，自带摘要与原文链接）。如需自建代理兜底，可填 Cloudflare Worker 地址，但其路由需返回 {ann:[],news:[]} 结构，本版未再调用该代理。
 const KLINE_PROXY='https://ai-industry-proxy.senhaohu.workers.dev'; // 美股 K 线代理(Cloudflare Worker，方案 A)。已部署——启用最实时的美股 K 线(覆盖纳斯达克+纽交所)。云端自动回退到内嵌静态快照 us_kline_cache.js(方案 B)兜底。本地(server.py)不受影响，仍走新浪直连。worker.js 路由见 /api/kline 与 /api/sina-kline。
+const PROPHET_PROXY=KLINE_PROXY; // 预言家·财联社事件代理（复用同一 Worker 的 /api/prophet/cls；本地走 server.py 同源 /api/prophet/cls）。
 // 公告类型标签（按标题关键词识别，突出“重大”事项）
 function annTag(t){
   if(/业绩|财报|一季|半年|年报|季报|预告|快报/.test(t))return{tx:'业绩',cls:'t-blue'};
@@ -6278,22 +6280,6 @@ function start(){
   document.getElementById('layerFilter').addEventListener('click',e=>{
     const b=e.target.closest('button');
     if(!b)return;
-    const menu=b.dataset.menu;
-    if(menu==='prophet'){
-      // 预言家：占位入口，后续可接专题页
-      const msg=document.createElement('div');
-      msg.style.cssText='position:fixed;top:80px;left:50%;transform:translateX(-50%);z-index:70;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 18px;box-shadow:0 8px 32px rgba(0,0,0,.35);font-size:13px;color:var(--sub)';
-      msg.textContent='预言家模块开发中，敬请期待';
-      document.body.appendChild(msg);
-      setTimeout(()=>msg.remove(),2000);
-      // 高亮预言家，取消二级栏目 active
-      b.classList.add('active');
-      document.querySelectorAll('#indSubFilter button').forEach(x=>{
-        x.classList.remove('active');
-        x.style.background='';x.style.borderColor='';x.style.color='';
-      });
-      return;
-    }
     setIndustry(b.dataset.ind);
   });
   document.addEventListener('visibilitychange',()=>{if(document.hidden){clearInterval(timer);}else{tick();timer=setInterval(tick,10000);}});
