@@ -62,7 +62,7 @@
     if (isLocal) {
       var url = pickURL('/api/prophet/cls');
       try {
-        var r = await fetch(url, { cache: 'no-store' });
+        var r = await fetchTimeout(url, { cache: 'no-store' }, 8000);
         var j = await r.json();
         if (j && Array.isArray(j.events) && j.events.length > 0) return j.events;
       } catch (e) {
@@ -87,9 +87,9 @@
   // CLS 日历直连解析（网页端主路径 + 本地端 fallback 共用）
   async function fetchCLSDirect() {
     try {
-      var r2 = await fetch('https://www.cls.cn/api/calendar/web/list', {
+      var r2 = await fetchTimeout('https://www.cls.cn/api/calendar/web/list', {
         cache: 'no-store', headers: { 'Accept': 'application/json' }
-      });
+      }, 10000);
       if (!r2.ok) { console.warn('[Prophet] cls http', r2.status); return []; }
       var j2 = await r2.json();
       var days = Array.isArray(j2 && j2.data) ? j2.data : null;
@@ -179,7 +179,7 @@
     if (isLocal) {
       var url = pickURL('/api/prophet/em');
       try {
-        var r = await fetch(url, { cache: 'no-store' });
+        var r = await fetchTimeout(url, { cache: 'no-store' }, 8000);
         var j = await r.json();
         if (j && Array.isArray(j.events)) return j.events;
         return [];
@@ -546,13 +546,29 @@
   var NEWS_ORDER = ['wscn', 'emflash', 'sina'];
   var newsCache = {};
 
-  // ---------- 华尔街见闻 直连（网页端：WSCN 开放 CORS，精确白名单 github.io 源，无需 Worker） ----------
+  // 带超时的 fetch 封装（防止网络不通时永久挂起）
+  function fetchTimeout(url, opts, ms) {
+    ms = ms || 10000;
+    var ctrl = new AbortController();
+    var timer = setTimeout(function () { ctrl.abort(); }, ms);
+    return fetch(url, Object.assign({}, opts || {}, { signal: ctrl.signal })).then(function (r) {
+      clearTimeout(timer);
+      return r;
+    }).catch(function (e) {
+      clearTimeout(timer);
+      throw e;
+    });
+  }
+
+  // ---------- 华尔街见闻 直连 ----------
+  // 网页端：WSCN 开放 CORS（精确白名单 github.io 源）
+  // 本地端：尝试直连（可能被 CORS 拒绝），失败后 fallback 到 server.py 代理
   function fetchWSCNDirect() {
     return new Promise(function (resolve) {
       var done = false;
       function finish(arr) { if (done) return; done = true; resolve(Array.isArray(arr) ? arr : []); }
       var api = 'https://api-one-wscn.awtmt.com/apiv1/content/lives?channel=global&client=pc&cursor=0&limit=30';
-      fetch(api, { cache: 'no-store', headers: { 'Accept': 'application/json' } })
+      fetchTimeout(api, { cache: 'no-store', headers: { 'Accept': 'application/json' } }, 10000)
         .then(function (r) { return r.json(); })
         .then(function (j) {
           var items = (j && j.data && Array.isArray(j.data.items)) ? j.data.items : [];
@@ -674,9 +690,10 @@
   }
 
   // 拉取单个新闻源并归一化为统一结构
-  // 网页端走 JSONP/直连；本地端（server.py :8787）走同源代理。
-  // 注意：JSONP 是 <script> 注入、与源无关，故 emflash/sina 在网页与本地两端均可用；
-  //       wscn 受 CORS 精确白名单限制（仅放行 github.io），本地只能走 server.py 代理。
+  // 网页端走 JSONP/CORS 直连；本地端先尝试直连，失败 fallback 到 server.py 同源代理。
+  // 注意：JSONP（<script>注入）与 CORS 无关 → emflash/sina 在网页+本地两端均可用；
+  //       wscn 受 CORS 精确白名单限制（仅放行 github.io），本地尝试直连→失败则走 server.py。
+  // 所有 fetch 均带 AbortController 超时（8~10s），防止永久挂起。
   async function fetchNews(key) {
     var meta = NEWS_SRC[key];
     if (!meta) return [];
@@ -699,12 +716,13 @@
       }
     }
 
-    // wscn：受 CORS 精确白名单限制（仅放行 https://shane7sam.github.io），本地只能走 server.py 代理
-    if (!isLocal && key === 'wscn') {
+    // wscn：网页端走 CORS 直连（精确白名单 github.io）；本地端也尝试直连，
+    //       失败后 fallback 到 server.py 代理
+    if (key === 'wscn') {
       try {
         var wItems = await fetchWSCNDirect();
         if (wItems && wItems.length) {
-          console.log('[Prophet] wscn via direct CORS:', wItems.length, 'items');
+          console.log('[Prophet] wscn via direct:', wItems.length, 'items');
           return wItems.map(function (it) {
             return { srcLabel: meta.label, srcCls: meta.cls, ts: it.ts || 0,
               timeText: it.ts ? fmtTs(it.ts) : (it.date || ''),
@@ -713,7 +731,7 @@
           });
         }
       } catch (e) {
-        console.warn('[Prophet] wscn direct failed, fallback to Worker:', e);
+        console.warn('[Prophet] wscn direct failed, fallback to proxy:', e);
       }
     }
 
@@ -738,7 +756,7 @@
     var url = pickURL(meta.path);
     if (!url) { console.warn('[Prophet] 未配置代理，无法拉取', key); return []; }
     try {
-      var r = await fetch(url, { cache: 'no-store' });
+      var r = await fetchTimeout(url, { cache: 'no-store' }, 8000);
       console.log('[Prophet] worker', key, 'status:', r.status);
       var j = await r.json();
       console.log('[Prophet] worker', key, 'keys:', j ? Object.keys(j).join(',') : 'null');
