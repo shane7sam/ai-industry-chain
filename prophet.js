@@ -57,28 +57,44 @@
   // 网页端：cls.cn 开放 CORS(access-control-allow-origin: *)，直接 fetch 无需 Worker
   // 本地端：走同源 /api/prophet/cls (server.py)
   async function fetchCLS() {
+    // 本地模式：先尝试 server.py 代理（更快、有缓存），失败则 fallback 直连 CLS（CORS *）
+    // file:// 协议下 server.py 未启动时也能工作
     if (isLocal) {
       var url = pickURL('/api/prophet/cls');
       try {
         var r = await fetch(url, { cache: 'no-store' });
         var j = await r.json();
-        if (j && Array.isArray(j.events)) return j.events;
-        return [];
+        if (j && Array.isArray(j.events) && j.events.length > 0) return j.events;
       } catch (e) {
-        console.warn('[Prophet] cls fetch failed:', e);
+        console.warn('[Prophet] cls local proxy failed, fallback to direct:', e);
+      }
+      // fallback: 直接连 CLS（CORS *，file:// / localhost 均可）
+      try {
+        return await fetchCLSDirect();
+      } catch (e2) {
+        console.warn('[Prophet] cls direct fallback also failed:', e2);
         return [];
       }
     }
     try {
-      var r2 = await fetch('https://www.cls.cn/api/calendar/web/list', {
-        cache: 'no-store', headers: { 'Accept': 'application/json' }
-      });
-      if (!r2.ok) { console.warn('[Prophet] cls http', r2.status); return []; }
-      var j2 = await r2.json();
-      var days = Array.isArray(j2 && j2.data) ? j2.data : null;
-      if (!days) return [];
-      var out = [];
-      days.forEach(function (day) {
+      return await fetchCLSDirect();
+    } catch (e) {
+      console.warn('[Prophet] cls direct failed:', e);
+      return [];
+    }
+  }
+
+  // CLS 日历直连解析（网页端主路径 + 本地端 fallback 共用）
+  async function fetchCLSDirect() {
+    var r2 = await fetch('https://www.cls.cn/api/calendar/web/list', {
+      cache: 'no-store', headers: { 'Accept': 'application/json' }
+    });
+    if (!r2.ok) { console.warn('[Prophet] cls http', r2.status); return []; }
+    var j2 = await r2.json();
+    var days = Array.isArray(j2 && j2.data) ? j2.data : null;
+    if (!days) return [];
+    var out = [];
+    days.forEach(function (day) {
         var d = (day.calendar_day || '').slice(0, 10);
         (day.items || []).forEach(function (it) {
           var ev = it.event || {};
