@@ -259,10 +259,155 @@
     modal.querySelector('.modal-mask').addEventListener('click', closeProphetDetail);
   }
 
-  function placeholderSection(title, tip) {
-    return '<div class="d-section"><h3>' + escapeHtml(title) + '</h3>'
-      + '<div class="d-note">' + escapeHtml(tip) + '</div></div>';
+  // ==================== 事件智能分析引擎 ====================
+  //
+  // 核心思路：点击事件 → 多源拉取相关新闻 → 纯客户端文本分析
+  //   1) 聚合所有新闻标题+摘要，生成结构化摘要（关键要点/多源佐证）
+  //   2) 关键词匹配产业链赛道（AI半导体/商业航天/机器人/创新药）
+  //   3) 从 PROFILES 提取个股名，文本匹配生成可点击个股标签
+  //   4) 新闻列表紧凑滚动展示
+
+  // ---- 产业链关键词映射 ----
+  var CHAIN_KEYWORDS = {
+    ai: {
+      label: 'AI/半导体', key: 'ai', color: '#6366f1',
+      words: ['AI','人工智能','大模型','GPT','LLM','算力','GPU','芯片','半导体','英伟达','NVIDIA',
+        '晶圆','光刻','存储','HBM','DRAM','NAND','CPU','推理','训练','数据中心','智算中心',
+        '服务器','台积电','中芯国际','寒武纪','海光信息','摩尔线程','壁仞科技','燧原科技',
+        '华为昇腾','百度昆仑','阿里平头哥','腾讯芯片','CoWoS','先进封装','硅光','光模块',
+        '液冷','CPO','PCB','铜缆','连接器','电源','变压器','HVDC','UPS','交换机','路由器',
+        '云计算','云服务','微软','谷歌','亚马逊AWS','Meta','字节跳动','OpenAI','Anthropic',
+        '机器学习','深度学习','神经网络','AIGC','生成式AI','具身智能','自动驾驶','智能驾驶',
+        'EDA','IP核','FPGA','SoC','MCU','模拟芯片','功率器件','IGBT','碳化硅','氮化镓',
+        '国产替代','自主可控','信创','数字经济','新质生产力']
+    },
+    space: {
+      label: '商业航天', key: 'space', color: '#f97316',
+      words: ['航天','卫星','火箭','发射','低轨','轨道','星座','GPS','北斗','遥感','导航',
+        'SpaceX','星链','星舰','马斯克',' reusable','可回收','运载火箭','长征','快舟',
+        '商业航天','民营航天','蓝箭航天','星际荣耀','银河航天','国科工',
+        '卫星互联网','高通量卫星','通信卫星','遥感卫星','对地观测',
+        '太空站','空间站','载人航天','登月','探月','火星探测','深空探测',
+        '固体燃料','液体燃料','发动机','推进器','姿控','测控','地面站',
+        '卫星制造','整星','平台载荷','太阳能帆板','天线','相控阵',
+        '在轨服务','碎片清理','太空垃圾','轨道资源','频谱资源','Ku/Ka/Q/V波段']
+    },
+    robot: {
+      label: '机器人', key: 'robot', color: '#06b6d4',
+      words: ['机器人','人形','协作','工业机器人','服务机器人','特种机器人',
+        '伺服电机','减速器','谐波','RV','行星减速','直线电机','力矩传感器',
+        '灵巧手','末端执行器','视觉系统','SLAM','路径规划','运动控制',
+        '特斯拉','Optimus','figure','波士顿动力','宇树','小米','傅利叶','智元',
+        '具身智能','强化学习','Sim2Real','世界模型','操作控制','双足','四足',
+        'AGV','AMR','无人车','物流机器人','清洁机器人','手术机器人','康复机器人',
+        '人机协作','安全围栏','示教','编程','数字孪生','仿真']
+    },
+    bio: {
+      label: '创新药', key: 'bio', color: '#a855f7',
+      words: ['创新药','ADC','GLP-1','靶点','临床','IND','NDA','FDA','NMPA','CDE',
+        '生物药','单抗','双抗','CAR-T','细胞治疗','基因治疗','mRNA','疫苗','核酸药物',
+        'PD-1','PD-L1','HER2','EGFR','ALK','BTK','CD20','CLL18','KRAS','TIGIT',
+        '百济神州','恒瑞医药','信达生物','君实生物','荣昌生物','康方生物','和黄医药',
+        '科伦博泰','翰森制药','中国生物制药','石药集团','先声药业','再鼎医药',
+        'License-out','授权','里程碑付款',' royalties','出海','全球权益','联合疗法',
+        '适应症','ORR','PFS','OS','DOR','客观缓解率','无进展生存期','总生存期',
+        '一线','二线','三线','头对头','优效性','非劣效性',
+        'CXO','CDMO','CRO','药明康德','药明生物','凯莱英','博腾股份','泰格医药',
+        '医疗器械','高值耗材','IVD','诊断试剂','影像设备','内窥镜','手术机器人']
+    }
+  };
+
+  // ---- 从全局 PROFILES 构建个股名称→代码映射 ----
+  function buildStockNameMap() {
+    var map = {}; // name_lower → {code, name}
+    try {
+      var profiles = (typeof window !== 'undefined' && window.PROFILES) || {};
+      Object.keys(profiles).forEach(function (code) {
+        var p = profiles[code];
+        if (!p || !p.one_liner) return;
+        // 从 one_liner 或 biz 中提取公司简称（通常第一个逗号前的部分）
+        var name = '';
+        if (p.one_liner) {
+          var m = p.one_liner.match(/^([^，,（(]+)/);
+          if (m) name = m[1].trim();
+        }
+        if (name && name.length >= 2) map[name.toLowerCase()] = { code: code, name: name };
+      });
+    } catch (e) { console.warn('[Prophet] buildStockNameMap error:', e); }
+    return map;
   }
+
+  // ---- 文本匹配：从文本中提取命中的产业链 ----
+  function matchIndustries(text) {
+    var t = (text || '').toLowerCase();
+    var hits = [];
+    Object.keys(CHAIN_KEYWORDS).forEach(function (k) {
+      var ci = CHAIN_KEYWORDS[k];
+      var matchedWords = ci.words.filter(function (w) { return t.indexOf(w.toLowerCase()) !== -1; });
+      if (matchedWords.length >= 1) { // 至少命中1个关键词即判定关联
+        hits.push({ key: ci.key, label: ci.label, color: ci.color, words: matchedWords });
+      }
+    });
+    // 按命中词数降序
+    hits.sort(function (a, b) { return b.words.length - a.words.length; });
+    return hits;
+  }
+
+  // ---- 文本匹配：提取提到的上市公司 ----
+  function matchStocks(text, stockMap) {
+    var t = text || '';
+    var found = [];
+    // 按名称长度降序优先匹配（避免短名误匹配长名的子串）
+    var names = Object.keys(stockMap).sort(function (a, b) { return b.length - a.length; });
+    names.forEach(function (nameLower) {
+      if (t.indexOf(nameLower) !== -1) {
+        found.push(stockMap[nameLower]);
+      }
+    });
+    // 去重（同一 code 只保留一次）
+    var seen = {};
+    found = found.filter(function (s) { if (seen[s.code]) return false; seen[s.code] = true; return true; });
+    return found.slice(0, 12); // 最多显示12个
+  }
+
+  // ---- 事件摘要生成：聚合新闻内容生成结构化要点 ----
+  function generateEventSummary(ev, newsItems) {
+    var parts = [];
+    // 1. 事件本身描述
+    parts.push({ type: 'ev', text: ev.title || '' });
+
+    // 2. 从新闻中提取关键要点（去重、精炼）
+    var points = [];
+    var seenPoints = {};
+    (newsItems || []).slice(0, 10).forEach(function (it) {
+      var txt = (it.summary || it.title || '').trim();
+      if (!txt || seenPoints[txt]) return;
+      seenPoints[txt] = true;
+      // 截取前120字作为要点
+      if (txt.length > 120) txt = txt.slice(0, 117) + '…';
+      points.push(txt);
+    });
+
+    // 3. 发酵度统计
+    var srcSet = {};
+    var dateList = [];
+    (newsItems || []).forEach(function (it) {
+      if (it.src) srcSet[it.src] = (srcSet[it.src] || 0) + 1;
+      if (it.date) dateList.push(it.date);
+    });
+
+    return {
+      title: ev.title || '',
+      points: points,
+      srcCount: Object.keys(srcSet).length,
+      newsCount: (newsItems || []).length,
+      sources: srcSet,
+      dates: dateList,
+      hasContent: points.length > 0
+    };
+  }
+
+  // ==================== 事件详情弹层渲染 ====================
 
   function openProphetDetail(ev) {
     if (!ev) return;
@@ -270,32 +415,186 @@
     var modal = document.getElementById('prophetDetail');
     var head = document.getElementById('pDetHead');
     head.querySelector('.nm').textContent = ev.title || '（无标题）';
-    var metaParts = [SRC_LABEL[ev.src] || ev.src];
+    var metaParts = [];
     if (ev.country) metaParts.push(ev.country);
     if (ev.cat === 'macro') metaParts.push('宏观事件');
-    head.querySelector('.meta').textContent = metaParts.join(' · ');
-    // 重要度（仿个股「题材纯度」区域）
+    head.querySelector('.meta').textContent = metaParts.join(' · ') || '财经事件';
+    // 重要度标签
     var tags = document.getElementById('pDetTags');
-    tags.innerHTML = (ev.importance ? '<span class="pl">重要性</span> <span class="ps">' + stars(ev.importance) + '</span>' : '')
-      + ' <span class="pl">来源</span> <span class="ps2" style="color:#e0a93b">财联社</span>';
-    // 日期时间（仿个股「价格」区域）
+    tags.innerHTML = (ev.importance ? '<span class="pl">重要性</span> <span class="ps">' + stars(ev.importance) + '</span>' : '');
+    // 日期时间
     var px = document.getElementById('pDetPx');
     var dt = ev.date + (ev.time && ev.time !== '00:00' ? ' ' + ev.time : '');
     px.innerHTML = '<div class="p">' + escapeHtml(dt) + '</div><div class="pe">事件时间</div>';
 
-    // 正文：事件详情/关联产业链/历史相似 仍占位；「相关新闻与公告」接东财 search-api-web 实时拉取
+    // 弹层正文：四区块（事件详情 / 关联产业链与个股 / 相关新闻紧凑滚动）
     var body = document.getElementById('pDetBody');
     body.innerHTML =
-        placeholderSection('事件详情', '内容建设中…后续将接入该事件的完整新闻正文、要点摘要与官方原文链接。')
-      + placeholderSection('关联产业链与个股', '内容建设中…后续将根据事件关键词自动匹配看板内的 AI / 商业航天 / 机器人 / 医药 产业链与相关个股。')
-      + '<div class="d-section"><div class="d-sec-h">相关新闻与公告 <span class="news-src" id="pdNewsSrc">东方财富 · 实时</span></div>'
-      +   '<div id="pdNews" class="pd-news-list"><div class="news-loading">正在获取…</div></div></div>'
-      + placeholderSection('历史相似事件与影响回顾', '内容建设中…后续将回溯同类事件的历史市场反应，辅助判断潜在影响方向。');
+        '<div class="d-section" id="pdSummary"><h3>事件详情</h3>'
+      +   '<div class="pd-summary-loading">正在分析事件…</div></div>'
+      + '<div class="d-section" id="pdChain"><h3>关联产业链与个股</h3>'
+      +   '<div class="d-note">正在匹配产业链与相关标的…</div></div>'
+      + '<div class="d-section"><div class="d-sec-h">相关新闻与公告 <span class="news-src" id="pdNewsSrc">加载中</span></div>'
+      +   '<div id="pdNews" class="pd-news-scroll"><div class="news-loading">正在获取…</div></div></div>';
 
-    // 打开弹层后异步拉取该事件的相关新闻与公告（东财 search-api-web JSONP 直连）
-    loadProphetNews(ev);
+    // 异步拉取新闻 → 分析 → 渲染全部区块
+    loadProphetNewsAndAnalyze(ev);
 
     modal.classList.remove('hidden');
+  }
+
+  // ---- 核心：拉取新闻 + 智能分析 + 渲染三区块 ----
+  function loadProphetNewsAndAnalyze(ev) {
+    var kw = (ev && ev.title ? ev.title : '').trim();
+    var summaryEl = document.getElementById('pdSummary');
+    var chainEl = document.getElementById('pdChain');
+    var newsBox = document.getElementById('pdNews');
+    var srcLabel = document.getElementById('pdNewsSrc');
+
+    // 1) 并行拉取：东财新闻 + 东财公告（各3页，JSONP直连）
+    Promise.all([
+      searchEMNews(kw, 'cmsArticleWebOld', 3),
+      searchEMNews(kw, 'notice', 3)
+    ]).then(function (res) {
+      var allNews = mergeProphetNews(res[1], res[0], 30); // 合并去重，上限30条
+
+      // 2) 生成事件摘要
+      var summary = generateEventSummary(ev, allNews);
+
+      // 3) 匹配产业链 & 个股
+      var stockMap = buildStockNameMap();
+      // 聚合所有新闻文本用于匹配
+      var fullText = [ev.title];
+      allNews.forEach(function (n) {
+        fullText.push(n.title || '');
+        fullText.push(n.summary || '');
+      });
+      var aggregateText = fullText.join(' ');
+      var industries = matchIndustries(aggregateText);
+      var stocks = matchStocks(aggregateText, stockMap);
+
+      // 4) 渲染「事件详情」区块
+      renderSummaryBlock(summaryEl, summary);
+
+      // 5) 渲染「关联产业链与个股」区块
+      renderChainBlock(chainEl, industries, stocks);
+
+      // 6) 渲染「相关新闻」紧凑滚动列表
+      renderCompactNews(newsBox, srcLabel, allNews, summary);
+
+    }).catch(function (e) {
+      if (summaryEl) summaryEl.querySelector('.pd-summary-loading')
+        && (summaryEl.querySelector('.pd-summary-loading').textContent = '分析失败：' + escapeHtml((e && e.message) || e));
+      if (newsBox) newsBox.innerHTML = '<div class="news-loading">获取失败</div>';
+      if (srcLabel) srcLabel.textContent = '获取失败';
+    });
+  }
+
+  // ---- 渲染：事件详情摘要 ----
+  function renderSummaryBlock(el, s) {
+    if (!el) return;
+    var html = '';
+    if (s.hasContent) {
+      html += '<ul class="pd-summary-list">';
+      s.points.forEach(function (pt) {
+        html += '<li>' + escapeHtml(pt) + '</li>';
+      });
+      html += '</ul>';
+      // 发酵度指示器
+      if (s.newsCount > 0) {
+        html += '<div class="pd-ferment">'
+          + '<span class="pf-label">发酵度</span>'
+          + '<span class="pf-badge">' + s.newsCount + '篇报道'
+          + (s.srcCount > 0 ? ' · ' + s.srcCount + '个来源' : '')
+          + '</span></div>';
+      }
+    } else {
+      html += '<div class="d-note">暂无详细报道，该事件可能为预告型或刚发布。</div>';
+    }
+    // 替换 loading 占位
+    var loading = el.querySelector('.pd-summary-loading');
+    if (loading) { loading.outerHTML = html; }
+  }
+
+  // ---- 渲染：关联产业链 + 个股标签 ----
+  function renderChainBlock(el, industries, stocks) {
+    if (!el) return;
+    var html = '';
+
+    // 产业链标签
+    if (industries.length > 0) {
+      html += '<div class="pd-chain-tags">';
+      industries.forEach(function (ind) {
+        html += '<span class="pd-chain-tag" data-ind="' + ind.key + '" style="border-color:' + ind.color + ';color:' + ind.color + '" title="点击进入' + ind.label + '板块">'
+          + escapeHtml(ind.label)
+          + '</span>';
+      });
+      html += '</div>';
+    } else {
+      html += '<div class="d-note" style="font-size:12.5px;">未检测到明确的产业链关联（或该事件属宏观政策/市场层面）</div>';
+    }
+
+    // 个股标签
+    if (stocks.length > 0) {
+      html += '<div class="pd-stock-tags">';
+      html += '<span class="pd-stock-label">提及个股</span>';
+      stocks.forEach(function (st) {
+        html += '<span class="pd-stock-tag" data-code="' + st.code + '" title="' + escapeHtml(st.name) + ' · 点击查看个股">'
+          + escapeHtml(st.name)
+          + '</span>';
+      });
+      html += '</div>';
+    }
+
+    el.innerHTML = '<h3>关联产业链与个股</h3>' + html;
+
+    // 绑定点击事件：产业链标签 → 切到产业链对应赛道
+    el.querySelectorAll('.pd-chain-tag[data-ind]').forEach(function (tag) {
+      tag.addEventListener('click', function () {
+        var indKey = tag.dataset.ind;
+        closeProphetDetail();
+        if (window.showChainTrack) window.showChainTrack(indKey);
+        else if (window.setIndustry) window.setIndustry(indKey);
+      });
+    });
+
+    // 绑定点击事件：个股标签 → 打开个股详情
+    el.querySelectorAll('.pd-stock-tag[data-code]').forEach(function (tag) {
+      tag.addEventListener('click', function () {
+        var code = tag.dataset.code;
+        closeProphetDetail();
+        if (typeof openDetail === 'function') openDetail(code);
+      });
+    });
+  }
+
+  // ---- 渲染：紧凑滚动新闻列表 ----
+  function renderCompactNews(box, srcLabel, items, summary) {
+    if (srcLabel) {
+      srcLabel.textContent = (summary && summary.newsCount ? summary.newsCount + '篇' : '') + ' 东方财富';
+    }
+    if (!box) return;
+
+    if (!items || !items.length) {
+      box.innerHTML = '<div class="news-loading">暂无相关报道</div>';
+      return;
+    }
+
+    box.innerHTML = items.map(function (it) {
+      var tag = it.kind === 'ann'
+        ? '<span class="pd-nk ann">公告</span>'
+        : '<span class="pd-nk news">报道</span>';
+      var meta = [];
+      if (it.sec) meta.push(escapeHtml(it.sec));
+      if (it.date) meta.push(escapeHtml(it.date));
+      var inner = tag
+        + '<span class="pd-nt-c">' + escapeHtml(it.title) + '</span>'
+        + (meta.length ? '<span class="pd-nm-c">' + meta.join(' · ') + '</span>' : '');
+      if (it.url) {
+        return '<a class="pd-ni-c" href="' + escapeHtml(it.url) + '" target="_blank" rel="noopener">' + inner + '</a>';
+      }
+      return '<div class="pd-ni-c">' + inner + '</div>';
+    }).join('');
   }
 
   function closeProphetDetail() {
@@ -369,45 +668,6 @@
     return out.slice(0, limit || 14);
   }
 
-  function newsItemHTML(it) {
-    var tag = it.kind === 'ann'
-      ? '<span class="pd-nk ann">公告</span>'
-      : '<span class="pd-nk news">新闻</span>';
-    var meta = [];
-    if (it.sec) meta.push(escapeHtml(it.sec));
-    if (it.src) meta.push(escapeHtml(it.src));
-    if (it.date) meta.push(escapeHtml(it.date));
-    var inner = tag
-      + '<div class="pd-nt">' + escapeHtml(it.title) + '</div>'
-      + (meta.length ? '<div class="pd-nm">' + meta.join(' · ') + '</div>' : '')
-      + (it.summary ? '<div class="pd-ns">' + escapeHtml(it.summary.slice(0, 110)) + (it.summary.length > 110 ? '…' : '') + '</div>' : '');
-    if (it.url) {
-      return '<a class="pd-ni" href="' + escapeHtml(it.url) + '" target="_blank" rel="noopener">' + inner + '</a>';
-    }
-    return '<div class="pd-ni">' + inner + '</div>';
-  }
-
-  function loadProphetNews(ev) {
-    var box = document.getElementById('pdNews');
-    if (!box) return;
-    var kw = (ev && ev.title ? ev.title : '').trim();
-    if (!kw) { box.innerHTML = '<div class="news-loading">该事件缺少可检索关键词。</div>'; return; }
-    // 多翻几页以捞到被淹没的相关报道；公告/新闻各 3 页
-    Promise.all([
-      searchEMNews(kw, 'cmsArticleWebOld', 3),
-      searchEMNews(kw, 'notice', 3)
-    ]).then(function (res) {
-      var merged = mergeProphetNews(res[1], res[0], 16);
-      if (!merged.length) {
-        box.innerHTML = '<div class="news-loading">暂无相关新闻与公告（东方财富未检索到匹配结果）。</div>';
-        return;
-      }
-      box.innerHTML = merged.map(newsItemHTML).join('');
-    }).catch(function (e) {
-      box.innerHTML = '<div class="news-loading">获取失败：' + escapeHtml((e && e.message) || e) + '</div>';
-    });
-  }
-
   async function load(pv) {
     var events = await fetchCLS();
     // 客户端安全过滤：丢弃今天之前开始的事件 + 宏观类型
@@ -459,6 +719,42 @@
       '.pd-ns{font-size:12.5px;color:var(--sub);margin-top:4px;line-height:1.55;}',
       '.news-loading{font-size:13px;color:var(--sub);padding:8px 2px;}',
       '.news-src{font-size:12px;font-weight:600;color:var(--sub);}',
+      // ===== 事件详情智能分析（新增） =====
+      // 事件摘要列表
+      '.pd-summary-list{margin:8px 0 0;padding-left:18px;}',
+      '.pd-summary-list li{font-size:13.5px;color:var(--text);line-height:1.65;margin-bottom:6px;'
+        + 'list-style-type:disc;list-style-position:outside;}',
+      // 发酵度指示器
+      '.pd-ferment{display:inline-flex;align-items:center;gap:8px;margin-top:10px;'
+        + 'padding:5px 12px;background:var(--panel);border-radius:10px;border:1px solid var(--line);}',
+      '.pf-label{font-size:11.5px;font-weight:700;color:var(--sub);text-transform:uppercase;letter-spacing:1px;}',
+      '.pf-badge{font-size:12px;font-weight:600;color:var(--midstream,var(--text));}',
+      // 关联产业链标签
+      '.pd-chain-tags{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0;}',
+      '.pd-chain-tag{font-size:13px;font-weight:700;padding:4px 14px;border-radius:20px;'
+        + 'background:transparent;border:1.5px solid;cursor:pointer;transition:all .15s;}',
+      '.pd-chain-tag:hover{background:currentColor;color:#fff !important;}',
+      // 个股标签
+      '.pd-stock-tags{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:10px;}',
+      '.pd-stock-label{font-size:11.5px;font-weight:600;color:var(--sub);margin-right:4px;}',
+      '.pd-stock-tag{font-size:12px;font-weight:600;padding:3px 10px;border-radius:14px;'
+        + 'color:#c0504d;background:rgba(192,80,77,.10);border:1px solid rgba(192,80,77,.25);'
+        + 'cursor:pointer;transition:all .15s;}',
+      '.pd-stock-tag:hover{background:rgba(192,80,77,.22);border-color:rgba(192,80,77,.45);}',
+      // 紧凑滚动新闻列表（替代旧版 pd-news-list）
+      '.pd-news-scroll{display:flex;flex-direction:column;gap:4px;margin-top:8px;'
+        + 'max-height:360px;overflow-y:auto;padding-right:4px;}'
+        + '/* 滚动条美化 */'
+        + '.pd-news-scroll::-webkit-scrollbar{width:5px;}'
+        + '.pd-news-scroll::-webkit-scrollbar-track{background:transparent;}'
+        + '.pd-news-scroll::-webkit-scrollbar-thumb{background:var(--line);border-radius:3px;}',
+      '.pd-ni-c{display:block;text-decoration:none;padding:7px 10px;border-bottom:1px solid var(--line);'
+        + 'transition:background .12s;}',
+      '.pd-ni-c:last-child{border-bottom:none;}',
+      '.pd-ni-c:hover{background:var(--panel);}',
+      '.pd-ni-c .pd-nk{font-size:10.5px;font-weight:700;padding:1px 6px;border-radius:8px;margin-right:6px;vertical-align:baseline;}',
+      '.pd-ni-c .pd-nt-c{font-size:13px;font-weight:600;color:var(--text);line-height:1.45;display:inline;}',
+      '.pd-ni-c .pd-nm-c{font-size:11px;color:var(--sub);margin-left:8px;display:inline;}',
       // 子视图切换（事件日历 / 实时快讯）
       '.prophet-sub{display:flex;gap:8px;margin:6px 0 14px;}',
       '.prophet-sub .psub{font-size:13px;font-weight:700;padding:6px 16px;border-radius:10px;cursor:pointer;'
