@@ -1,11 +1,11 @@
-/* 预言家栏目 · 前端客户端与渲染（财联社 + 东方财富 双源）
- * - fetchCLS(): 网页端走 Cloudflare Worker 代理(PROPHET_PROXY)，本地端走同源 /api/prophet/cls
- * - fetchEM():  网页端 JSONP 直连 datacenter-web.eastmoney.com（东财无 CORS 头，必须 JSONP）；
- *               本地端走同源 /api/prophet/em (server.py)
- * - render():   把合并后的归一化事件按日期分组渲染进 #prophetView，并标注来源(财联社/东财)
+/* 预言家栏目 · 前端客户端与渲染（事件日历·财联社 / 新闻库·多源聚合）
+ * - fetchCLS(): 网页端 CORS 直连 cls.cn（access-control-allow-origin: *），本地端走同源 /api/prophet/cls
+ * - renderCalendar(): 只渲染财联社事件日历（不再合并东财）
+ * - fetchNews(): 多源新闻聚合——华尔街见闻(CORS) / 东财7×24(JSONP) / 新浪财经(JSONP)
  * - 事件详情：每条事件可点击，弹出复用「个股窗口」CSS 模板的详情弹层（#prophetDetail），内容先做占位
  * - 视图切换：与顶部「产业链」导航并列，点击「事件日历」切换主视图
- * 归一化事件结构: {src:'cls'|'em',date,time,title,country,importance,cat}
+ * 归一化事件结构: {src:'cls',date,time,title,country,importance,cat}
+ * 归一化新闻结构: {srcLabel,srcCls,ts,timeText,title,content,url,tags,symbols,extra}
  */
 (function () {
   'use strict';
@@ -20,7 +20,7 @@
   var evMap = {};
   var evSeq = 0;
 
-  // 预言家子视图：'cal'=事件日历（财联社+东财）  'news'=新闻库（聚合所有抓取新闻源）
+  // 预言家子视图：'cal'=事件日历（财联社）  'news'=新闻库（聚合抓取新闻源）
   var subView = 'cal';
 
   // 延迟解析代理基址：PROPHET_PROXY/KLINE_PROXY 在页面底部 const 定义，
@@ -182,25 +182,24 @@
     return Object.keys(m).sort().map(function (d) { return { date: d, items: m[d] }; });
   }
 
-  var SRC_LABEL = { cls: '财联社', em: '东财' };
+  var SRC_LABEL = { cls: '财联社' };
 
   function renderCalendar(events, mount) {
     var el = mount || document.getElementById('prophetContent');
     if (!el) return;
     evMap = {};
     evSeq = 0;
-    // 按来源统计（便于诊断）
-    var clsCount = 0, emCount = 0;
-    (events || []).forEach(function (e) { if (e.src === 'cls') clsCount++; else emCount++; });
+    // 按来源统计
+    var clsCount = (events || []).length;
     if (!events || !events.length) {
-      el.innerHTML = '<div class="prophet-empty">事件日历暂不可用（代理未部署或网络异常）。'
-        + '网页端财联社需部署 Cloudflare Worker 的 /api/prophet/cls、东财走 JSONP 直连；本地端由 server.py 提供。</div>';
+      el.innerHTML = '<div class="prophet-empty">事件日历暂不可用（网络异常或财联社接口变更）。'
+        + '网页端 CORS 直连 cls.cn；本地端由 server.py 提供。</div>';
       return;
     }
     var groups = groupByDate(events);
-    var srcHint = '（财联社 ' + clsCount + ' 条 · 东财 ' + emCount + ' 条）';
-    var html = '<div class="prophet-head">事件日历 · 财联社 + 东方财富（未来 30 天）'
-      + '<span class="plegend"><i class="lg cls">财联社</i><i class="lg em">东财</i>'
+    var srcHint = '（财联社 ' + clsCount + ' 条）';
+    var html = '<div class="prophet-head">事件日历 · 财联社（未来 30 天）'
+      + '<span class="plegend"><i class="lg cls">财联社</i>'
       + '<span class="psrc-count">' + srcHint + '</span></span></div>';
     groups.forEach(function (g) {
       html += '<div class="pday"><div class="pdate">' + escapeHtml(g.date) + '</div><div class="pitems">';
@@ -211,11 +210,9 @@
         var uid = 'e' + (evSeq++);
         evMap[uid] = it;
         var imp = it.importance >= 4 ? 'hot' : (it.importance >= 3 ? 'mid' : 'low');
-        var srcCls = it.src === 'em' ? 'em' : 'cls';
-        html += '<div class="pitem ' + imp + '" data-uid="' + uid + '" title="点击查看事件详情">'
+        html += '<div class="pitem ' + imp + '" data-uid="' + uid + '" title="点击查看事件详情"'
           + (it.importance ? '<span class="pstar">' + stars(it.importance) + '</span>' : '')
           + '<span class="ptitle">' + escapeHtml(it.title) + '</span>'
-          + '<span class="psrc ' + srcCls + '">' + (SRC_LABEL[it.src] || it.src) + '</span>'
           + (it.country ? '<span class="pcountry">' + escapeHtml(it.country) + '</span>' : '')
           + (it.time && it.time !== '00:00' ? '<span class="ptime">' + escapeHtml(it.time) + '</span>' : '')
           + '</div>';
@@ -265,7 +262,7 @@
     // 重要度（仿个股「题材纯度」区域）
     var tags = document.getElementById('pDetTags');
     tags.innerHTML = (ev.importance ? '<span class="pl">重要性</span> <span class="ps">' + stars(ev.importance) + '</span>' : '')
-      + (ev.src === 'cls' ? ' <span class="pl">来源</span> <span class="ps2" style="color:#e0a93b">财联社</span>' : ' <span class="pl">来源</span> <span class="ps2" style="color:#5b9bd5">东方财富</span>');
+      + ' <span class="pl">来源</span> <span class="ps2" style="color:#e0a93b">财联社</span>';
     // 日期时间（仿个股「价格」区域）
     var px = document.getElementById('pDetPx');
     var dt = ev.date + (ev.time && ev.time !== '00:00' ? ' ' + ev.time : '');
@@ -397,16 +394,12 @@
   }
 
   async function load(pv) {
-    var clsP = fetchCLS();
-    var emP = fetchEM();
-    var both = await Promise.all([clsP, emP]);
-    var merged = both[0].concat(both[1]);
-    // 客户端安全过滤：丢弃今天之前开始的事件（防止上游过滤宽松导致过去事件泄露）
-    // 同时过滤东财经济数据类型（网页端 JSONP 直连路径不经过 Worker 过滤）
+    var events = await fetchCLS();
+    // 客户端安全过滤：丢弃今天之前开始的事件 + 宏观类型
     var todayStr = new Date().toISOString().slice(0, 10);
-    merged = merged.filter(function (ev) { return ev.date >= todayStr && ev.cat !== 'macro'; });
+    events = events.filter(function (ev) { return ev.date >= todayStr && ev.cat !== 'macro'; });
     var c = pv ? pv.querySelector('#prophetContent') : document.getElementById('prophetContent');
-    renderCalendar(merged, c);
+    renderCalendar(events, c);
   }
 
   function injectStyle() {
@@ -471,9 +464,7 @@
       '.flash-item .f-src{font-size:11px;font-weight:700;padding:1px 8px;border-radius:9px;}',
       '.flash-item .f-src.wscn{color:#e0a93b;background:rgba(224,169,59,.14);}',
       '.flash-item .f-src.em{color:#5b9bd5;background:rgba(91,155,213,.14);}',
-      '.flash-item .f-src.jin10{color:#c0504d;background:rgba(192,80,77,.14);}',
-      '.flash-item .f-src.policy{color:#8e6fd8;background:rgba(142,111,216,.14);}',
-      '.flash-item .f-src.commodity{color:#3f9d6d;background:rgba(63,157,109,.14);}',
+      '.flash-item .f-src.sina{color:#e0504d;background:rgba(224,80,77,.14);}',
       '.flash-item .f-time{font-size:12px;color:var(--sub);font-weight:600;}',
       '.flash-item .f-link{font-size:12px;color:#5b9bd5;text-decoration:none;font-weight:600;}',
       '.flash-item .f-link:hover{text-decoration:underline;}',
@@ -528,17 +519,14 @@
     if (tab) tab.classList.add('active');
   }
 
-  // ---------------- 新闻库（聚合所有抓取的新闻源） ----------------
-  // 实时快讯类：华尔街见闻 / 东财 7×24 / 金十（items 带 ts 时间戳）
-  // 列表类：政策公告（央行/证监会/国务院）/ 大宗商品（EIA/OPEC）（items 带 date/source）
+  // ---------------- 新闻库（聚合可用新闻源，全部浏览器端直连/JSONP） ----------------
+  // 实时快讯类：华尔街见闻(CORS直连) / 东财7×24(JSONP) / 新浪财经(JSONP)
   var NEWS_SRC = {
     wscn:      { label: '华尔街见闻', path: '/api/prophet/wscn',      cls: 'wscn' },
     emflash:   { label: '东财7×24',   path: '/api/prophet/emflash',   cls: 'em' },
-    jin10:     { label: '金十',       path: '/api/prophet/jin10',     cls: 'jin10' },
-    policy:    { label: '政策公告',   path: '/api/prophet/policy',    cls: 'policy' },
-    commodity: { label: '大宗商品',   path: '/api/prophet/commodity', cls: 'commodity' }
+    sina:      { label: '新浪财经',   path: '/api/prophet/sina',      cls: 'sina' }
   };
-  var NEWS_ORDER = ['wscn', 'emflash', 'jin10', 'policy', 'commodity'];
+  var NEWS_ORDER = ['wscn', 'emflash', 'sina'];
   var newsCache = {};
 
   // ---------- 华尔街见闻 直连（网页端：WSCN 开放 CORS，精确白名单 github.io 源，无需 Worker） ----------
@@ -620,7 +608,45 @@
         s.onerror = function () { done++; if (done >= keywords.length) finish(); };
         (document.head || document.body).appendChild(s);
       });
-      setTimeout(function () { finish(); }, 12000);
+        setTimeout(function () { finish(); }, 12000);
+    });
+  }
+
+  // ---------- 新浪财经 JSONP 直连（网页端：feed.mix.sina.com.cn 支持 callback=，完美绕过 CORS） ----------
+  // 覆盖 A 股/港股/美股/期货/外汇/基金等全品类财经新闻
+  function fetchSinaJsonp() {
+    return new Promise(function (resolve) {
+      var cb = '__sina_' + Date.now();
+      var api = 'https://feed.mix.sina.com.cn/api/roll/get'
+        + '?pageid=153&lid=2509&num=30&page=1&versionNumber=1.2.4&encode=utf-8'
+        + '&callback=' + cb;
+      var done = false;
+      function finish(arr) { if (done) return; done = true; resolve(Array.isArray(arr) ? arr : []); }
+      window[cb] = function (j) {
+        try {
+          var data = (j && j.result && j.result.data) || [];
+          var out = data.map(function (it) {
+            // ctime/intime 为 Unix 秒级时间戳
+            var ts = Number(it.ctime || it.intime || 0);
+            if (ts > 0 && ts < 1e12) ts *= 1000; // 秒→毫秒
+            return {
+              ts: ts,
+              title: (it.title || '').trim(),
+              content: (it.intro || '').replace(/\s+/g, ' ').trim(),
+              url: it.url || '',
+              tags: [],
+              symbols: [],
+              extra: it.media_name || ''
+            };
+          });
+          finish(out);
+        } catch (e) { finish([]); }
+      };
+      var s = document.createElement('script');
+      s.src = api;
+      s.onerror = function () { finish([]); };
+      (document.head || document.body).appendChild(s);
+      setTimeout(function () { finish([]); }, 12000);
     });
   }
 
@@ -631,13 +657,15 @@
   }
 
   // 拉取单个新闻源并归一化为统一结构
-  // 网页端优先尝试 JSONP 直连（绕过 Worker），失败再走 Worker 代理
+  // 网页端走 JSONP/直连；本地端（server.py :8787）走同源代理。
+  // 注意：JSONP 是 <script> 注入、与源无关，故 emflash/sina 在网页与本地两端均可用；
+  //       wscn 受 CORS 精确白名单限制（仅放行 github.io），本地只能走 server.py 代理。
   async function fetchNews(key) {
     var meta = NEWS_SRC[key];
     if (!meta) return [];
 
-    // 网页端：emflash 优先走 JSONP 直连（东财 search-api-web 支持回调）
-    if (!isLocal && key === 'emflash') {
+    // emflash：JSONP 直连（东财 search-api-web 支持回调）——网页与本地均可用
+    if (key === 'emflash') {
       try {
         var items = await fetchEmFlashJsonp();
         if (items && items.length) {
@@ -654,7 +682,7 @@
       }
     }
 
-    // 网页端：wscn 走直连（WSCN 开放 CORS，精确白名单 github.io 源，无需 Worker）
+    // wscn：受 CORS 精确白名单限制（仅放行 https://shane7sam.github.io），本地只能走 server.py 代理
     if (!isLocal && key === 'wscn') {
       try {
         var wItems = await fetchWSCNDirect();
@@ -669,6 +697,24 @@
         }
       } catch (e) {
         console.warn('[Prophet] wscn direct failed, fallback to Worker:', e);
+      }
+    }
+
+    // sina：JSONP 直连（feed.mix.sina.com.cn 支持 callback=，与源无关，网页与本地均可用）
+    if (key === 'sina') {
+      try {
+        var sItems = await fetchSinaJsonp();
+        if (sItems && sItems.length) {
+          console.log('[Prophet] sina via JSONP:', sItems.length, 'items');
+          return sItems.map(function (it) {
+            return { srcLabel: meta.label, srcCls: meta.cls, ts: it.ts || 0,
+              timeText: it.ts ? fmtTs(it.ts) : '',
+              title: it.title || '', content: (it.content && it.content !== it.title) ? it.content : '',
+              url: it.url || '', tags: it.tags || [], symbols: it.symbols || [], extra: it.extra || '' };
+          });
+        }
+      } catch (e) {
+        console.warn('[Prophet] sina JSONP failed, fallback to Worker:', e);
       }
     }
 
@@ -732,8 +778,8 @@
       bar += '<button class="fbtn" data-nsrc="' + k + '">' + escapeHtml(NEWS_SRC[k].label) + '</button>';
     });
     bar += '</div>';
-    c.innerHTML = '<div class="prophet-head">新闻库 · 全部抓取新闻聚合'
-      + '<span class="plegend"><i class="lg em">华尔街见闻 / 东财 / 金十 / 政策 / 大宗</i></span></div>'
+    c.innerHTML = '<div class="prophet-head">新闻库 · 财经快讯聚合'
+      + '<span class="plegend"><i class="lg em">华尔街见闻 / 东财 / 新浪</i></span></div>'
       + bar + '<div id="newsList" class="flash-list"><div class="news-loading">加载中…</div></div>';
     var list = c.querySelector('#newsList');
     Array.prototype.forEach.call(c.querySelectorAll('.flash-bar .fbtn'), function (b) {
@@ -772,7 +818,7 @@
     if (!all.length) {
       // 更详细的空结果提示：列出各源状态
       var detail = keys.map(function (k) { return NEWS_SRC[k].label; }).join(' / ');
-      var tip = filter === 'jin10' ? '金十需配置 secret-key（见部署说明）' : ('以下源均无数据返回：' + detail + '。若持续为空，请检查 Worker 是否正常运行（' + (window.PROPHET_PROXY || '未配置') + '）');
+      var tip = '以下源均无数据返回：' + detail + '。请检查网络连接。';
       list.innerHTML = '<div class="news-loading">暂无可显示的新闻（' + tip + '）。</div>';
       return;
     }
@@ -828,5 +874,5 @@
     wire();
   }
 
-  window.Prophet = { fetchCLS: fetchCLS, fetchEM: fetchEM, render: renderCalendar, load: load, renderNews: renderNews, loadNews: loadNews, showProphet: showProphet, showChain: showChain, openProphetDetail: openProphetDetail, closeProphetDetail: closeProphetDetail };
+  window.Prophet = { fetchCLS: fetchCLS, render: renderCalendar, load: load, renderNews: renderNews, loadNews: loadNews, showProphet: showProphet, showChain: showChain, openProphetDetail: openProphetDetail, closeProphetDetail: closeProphetDetail };
 })();
