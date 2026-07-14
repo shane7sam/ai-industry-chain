@@ -499,7 +499,7 @@
     pv.innerHTML = ''
       + '<div id="prophetSub" class="prophet-sub">'
       +   '<button class="psub active" data-sub="cal">事件日历</button>'
-      +   '<button class="psub" data-sub="news">新闻库</button>'
+      +   '<button class="psub" data-sub="news">7×24</button>'
       + '</div>'
       + '<div id="prophetContent" class="prophet-content"></div>';
     Array.prototype.forEach.call(pv.querySelectorAll('#prophetSub .psub'), function (b) {
@@ -765,7 +765,7 @@
       bar += '<button class="fbtn' + (t === 'all' ? ' active' : '') + '" data-ntopic="' + t + '">' + escapeHtml(lbl) + '</button>';
     });
     bar += '</div>';
-    c.innerHTML = '<div class="prophet-head">新闻库 · 7×24</div>'
+    c.innerHTML = '<div class="prophet-head">7×24</div>'
       + bar + '<div id="newsList" class="flash-list"><div class="news-loading">加载中…</div></div>';
     var list = c.querySelector('#newsList');
     Array.prototype.forEach.call(c.querySelectorAll('.flash-bar .fbtn'), function (b) {
